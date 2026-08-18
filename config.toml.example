@@ -1,0 +1,72 @@
+# /etc/adsbng-feeder/config.toml
+#
+# ADSBNG contributor feeder configuration.
+#
+# Permissions matter: this file holds your station token, which is the only
+# credential the gateway accepts. The installer sets it to owner-only (0600).
+# If you edit it by hand, keep it that way:
+#
+#     sudo chown adsbng:adsbng /etc/adsbng-feeder/config.toml
+#     sudo chmod 600           /etc/adsbng-feeder/config.toml
+#
+# After any change:
+#
+#     sudo adsbng-feeder --check-config --config /etc/adsbng-feeder/config.toml
+#     sudo systemctl restart adsbng-feeder
+#
+# Format: flat `key = value` pairs. Comments start with '#'. Quotes are optional
+# unless the value contains spaces or a '#'. Unknown keys are a startup error
+# rather than being ignored, so a typo cannot silently disable something.
+
+# ---------------------------------------------------------------------------
+# Issued to you by ADSBNG — all three come from your provisioning message.
+# ---------------------------------------------------------------------------
+
+# A local label for your own logs. It is sent to the gateway as a diagnostic
+# hint only: your station's real identity is derived from the token below, so
+# changing this cannot change how your data is attributed.
+station_id = "LAGOS_01"
+
+# Your station token. Treat it exactly like a password:
+#   * never post it in a forum, issue, or support thread
+#   * never share it with another station operator
+#   * if it leaks, ask ADSBNG to rotate it (your old token stops working)
+token = "PASTE_YOUR_STATION_TOKEN_HERE"
+
+# The ADSBNG ingest endpoint. Outbound TLS only — nothing needs to be
+# forwarded, opened, or exposed on your network or router.
+gateway = "ingest.adsbng.app:443"
+
+# ---------------------------------------------------------------------------
+# Local Beast source — the default suits a standard readsb/dump1090 install.
+# ---------------------------------------------------------------------------
+
+# Where your decoder publishes raw Beast output. readsb and dump1090-fa both
+# use 127.0.0.1:30005 unless reconfigured. If your receiver runs on another
+# machine on your LAN, point this at it, e.g. "192.168.1.50:30005".
+beast_source = "127.0.0.1:30005"
+
+# ---------------------------------------------------------------------------
+# TLS (optional)
+# ---------------------------------------------------------------------------
+
+# A PEM bundle to verify the gateway against INSTEAD of the system roots. Set
+# this only if ADSBNG told you to — it is for private-CA deployments. Leave it
+# unset and the system trust store is used, which is what you want in
+# production. Certificate verification stays fully enabled either way.
+#ca_file = "/etc/adsbng-feeder/ca.pem"
+
+# insecure_skip_verify disables TLS certificate verification entirely.
+#
+#   DEVELOPMENT ONLY. DO NOT SET THIS ON A REAL STATION.
+#
+# With it enabled, anyone able to intercept the connection can impersonate the
+# gateway and capture your station token. It exists so the project's own
+# acceptance tests can run against a throwaway local certificate. The feeder
+# logs a loud warning on every connection while it is on.
+#
+# To run against a private CA, use ca_file above instead — that keeps
+# verification on. The two options are mutually exclusive and setting both is
+# a startup error, because a config that pins a CA *and* skips verification
+# looks careful while being neither.
+#insecure_skip_verify = false

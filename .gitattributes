@@ -1,0 +1,24 @@
+# Line endings are pinned, not left to each machine's core.autocrlf.
+#
+# This repository is installed by running shell scripts on Linux. A CRLF shebang
+# fails with "bad interpreter: /usr/bin/env bash^M", which is an instant, total,
+# and confusing failure on a contributor's Raspberry Pi — and the contributor is
+# the person least equipped to diagnose it. The systemd unit and the config
+# example have the same problem in a quieter form.
+#
+# eol=lf applies to the working copy as well as the blob, so a checkout on a
+# Windows workstation still produces files that run correctly under WSL.
+* text=auto eol=lf
+
+# Explicitly LF, since these are the ones that break loudly.
+*.sh      text eol=lf
+*.service text eol=lf
+*.toml    text eol=lf
+*.go      text eol=lf
+*.md      text eol=lf
+*.example text eol=lf
+
+# Never touch these.
+*.png binary
+*.gz  binary
+*.pem binary

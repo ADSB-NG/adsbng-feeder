@@ -1,0 +1,99 @@
+[Unit]
+Description=ADSBNG contributor feeder (forwards local Beast data to ADSBNG)
+Documentation=file:/usr/share/doc/adsbng-feeder/CONTRIBUTOR_SETUP.md
+After=network-online.target
+Wants=network-online.target
+
+# A soft dependency on the local decoder: if readsb (or dump1090-fa) is present
+# we would rather start after it. Neither is required — the feeder retries its
+# local Beast source with backoff, so ordering is a convenience, not a contract.
+After=readsb.service dump1090-fa.service
+
+[Service]
+Type=simple
+
+# Runs as a dedicated unprivileged system account, never root. The feeder needs
+# no privileges at all: it opens two outbound TCP connections and reads one
+# config file.
+User=adsbng
+Group=adsbng
+
+# Fail fast and legibly on a bad config. Without this the service would start,
+# exit 2, and restart forever, with the reason buried in the journal.
+ExecStartPre=/usr/local/bin/adsbng-feeder --check-config --config /etc/adsbng-feeder/config.toml
+ExecStart=/usr/local/bin/adsbng-feeder --config /etc/adsbng-feeder/config.toml
+
+# The feeder handles transient faults itself (1s→30s backoff on either endpoint)
+# and returns only when told to stop. So a process exit means something
+# unexpected happened, and restarting is right.
+Restart=always
+RestartSec=5s
+
+# Do not give up permanently. A contributor's link may be down for a long time,
+# or they may be part-way through fixing the config; the service should still be
+# running when they finish.
+StartLimitIntervalSec=0
+
+KillSignal=SIGTERM
+TimeoutStopSec=15s
+
+# journald captures stdout; see `journalctl -u adsbng-feeder -f`.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=adsbng-feeder
+
+# ---------------------------------------------------------------------------
+# Hardening
+#
+# The feeder's job is narrow enough that almost everything can be taken away.
+# It needs: read /etc/adsbng-feeder/config.toml, resolve a hostname, open two
+# outbound TCP sockets. Nothing else — no writes anywhere on disk, no
+# privileged syscalls, no devices, no capabilities.
+#
+# Every line below was checked against that list rather than copied wholesale:
+# a restriction that breaks the service is worse than one that is missing,
+# because it fails on someone else's machine where we cannot debug it.
+# ---------------------------------------------------------------------------
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+ProcSubset=pid
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RemoveIPC=true
+DevicePolicy=closed
+UMask=0077
+
+# No capabilities whatsoever. The feeder binds no port, privileged or otherwise.
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+# TCP over IPv4/IPv6 for the two outbound connections. AF_UNIX is permitted
+# because a local name-service socket (systemd-resolved, nscd) is reachable that
+# way on some distributions, and DNS failing on a contributor's box would be an
+# opaque outage for them.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @obsolete @mount @debug @cpu-emulation @swap
+
+# ProtectSystem=strict leaves the whole filesystem read-only and no writable
+# path is added, because the feeder writes nothing. If a future version needs
+# state, add StateDirectory=adsbng-feeder rather than relaxing this.
+
+[Install]
+WantedBy=multi-user.target

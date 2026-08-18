@@ -1,0 +1,31 @@
+# Build output. Binaries are release artefacts, published with a checksum
+# manifest — never committed.
+/dist/
+
+# A real config contains a live station token. The example is committed; an
+# actual config.toml at the repo root is a mistake worth blocking here rather
+# than discovering in a commit.
+config.toml
+*.local.toml
+
+# Local TLS material for testing against a throwaway gateway certificate.
+*.pem
+*.key
+*.crt
+*.csr
+
+# Never in this repository. It has no place in the contributor-facing tree at
+# all, and internal/feeder/security_test.go fails if one appears.
+.env
+.env.*
+
+# Editor and OS noise
+*~
+*.swp
+.DS_Store
+.idea/
+.vscode/
+
+# Go
+*.test
+*.out

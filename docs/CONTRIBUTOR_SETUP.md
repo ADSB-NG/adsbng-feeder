@@ -74,12 +74,21 @@ the feeder. Beast is a binary protocol, so do not expect readable text.
 
 ## Step 2 — install the feeder
 
-From a release archive, or a clone of this repository:
+On the machine that will feed, download the installer from ADSBNG and run it. It
+fetches the right binary for your architecture, verifies it against a published
+checksum, installs the systemd unit, and starts the service:
 
 ```bash
-# only if you are installing from source rather than a release archive
-./scripts/build.sh
+curl -fsSL https://adsbng.app/feeder/install.sh -o install.sh
+# read it if you like — it is a few hundred lines of shell — then:
+sudo bash install.sh
+```
 
+Prefer to build from source, or already have a clone or release archive? Run the
+installer from inside it and it uses the local binary instead of downloading:
+
+```bash
+./scripts/build.sh      # only when installing from source; needs Go 1.24+
 sudo ./install.sh
 ```
 
@@ -125,8 +134,11 @@ sudo shred -u /root/token.txt
 
 It does not download unrelated software, does not install any ADSBNG application
 code, does not ask for database credentials, and does not touch your readsb
-configuration. It has no network access at all unless you explicitly set
-`ADSBNG_DOWNLOAD_BASE` to fetch a binary.
+configuration. Its only network access is to ADSBNG's own distribution host, to
+fetch the feeder binary (verified against a published checksum) and — in the
+one-command install above — the systemd unit. Point `ADSBNG_DOWNLOAD_BASE`
+elsewhere to use a mirror, or install from a local clone or release archive (or
+`--binary`) for no network access at all.
 
 ---
 

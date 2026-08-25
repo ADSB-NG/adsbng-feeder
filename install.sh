@@ -17,7 +17,9 @@
 #   * install readsb, dump1090, or any other third-party software
 #   * install any ADSBNG decoder, analytics, or server component
 #   * ask for, read, or copy any database credential
-#   * contact anything other than the download host, if you use one
+#   * contact anything other than the ADSBNG host it downloads the feeder from
+#     (adsbng.app by default; override with ADSBNG_DOWNLOAD_BASE, or pass
+#     --binary to install fully offline)
 #
 # Re-running it is safe and is how you upgrade: the binary and service file are
 # replaced, and your existing config is left alone unless you pass
@@ -37,10 +39,20 @@ SVC_GROUP="adsbng"
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
-# ADSBNG has not published a release URL yet, so there is intentionally no
-# default here. Set ADSBNG_DOWNLOAD_BASE to a base URL to fetch from one, or
-# pass --binary PATH to install a locally built binary (see scripts/build.sh).
-DOWNLOAD_BASE="${ADSBNG_DOWNLOAD_BASE:-}"
+# Where install.sh fetches the binary — and, when it is run on its own without
+# the rest of the repository beside it, the systemd unit and reference docs — if
+# they are not already next to this script. It defaults to ADSBNG's own
+# distribution host, pinned to a specific release, so that
+#
+#     curl -fsSL https://adsbng.app/feeder/install.sh -o install.sh
+#     sudo bash install.sh
+#
+# is a complete install with nothing else to fetch by hand. The binary is always
+# checked against a published SHA256SUMS before it is installed. Override this to
+# install from a mirror you control, or pass --binary PATH to install a locally
+# built binary with no network access at all (see scripts/build.sh). Set it to
+# the empty string to require a local binary and refuse to download.
+DOWNLOAD_BASE="${ADSBNG_DOWNLOAD_BASE:-https://adsbng.app/feeder/v1.0.0}"
 
 STATION_ID=""
 TOKEN=""
@@ -91,8 +103,9 @@ TLS:
                          certificate verification stays enabled)
 
 Installation source:
-  --binary PATH          install this already-built binary
-                         (default: look in ./dist for your architecture)
+  --binary PATH          install this already-built binary, with no download
+                         (default: use ./dist if present, otherwise download
+                         from ADSBNG_DOWNLOAD_BASE and verify its checksum)
 
 Other:
   --force-config         overwrite an existing config.toml
@@ -101,7 +114,9 @@ Other:
 
 Environment:
   ADSBNG_STATION_TOKEN   station token, read if --token/--token-file are absent
-  ADSBNG_DOWNLOAD_BASE   base URL to download the binary from
+  ADSBNG_DOWNLOAD_BASE   base URL to download the binary, systemd unit, and docs
+                         from (default: https://adsbng.app/feeder/v1.0.0). Set it
+                         to the empty string to require a local binary instead.
 EOF
 }
 
@@ -206,19 +221,20 @@ elif [ -n "$DOWNLOAD_BASE" ]; then
 else
 	die "no binary to install.
 
-There is no public download URL for the ADSBNG feeder yet, so this installer
-does not have a default one — it will not guess at a URL and fetch code from
-it. Choose one of:
+No binary was found beside this script and ADSBNG_DOWNLOAD_BASE is empty, so
+there is nothing to download. Choose one of:
+
+  * Let the installer download it from ADSBNG (the default — you have set the
+    download base to an empty value, which is why you are seeing this):
+        unset ADSBNG_DOWNLOAD_BASE
+        sudo ./install.sh
 
   * Build from source (needs Go 1.24+, takes a few seconds):
         ./scripts/build.sh
         sudo ./install.sh
 
-  * Install a binary you already have:
-        sudo ./install.sh --binary /path/to/${ASSET}
-
-  * Point at a release host you trust:
-        sudo ADSBNG_DOWNLOAD_BASE=https://example.org/adsbng ./install.sh"
+  * Install a binary you already have, with no network access:
+        sudo ./install.sh --binary /path/to/${ASSET}"
 fi
 
 # Sanity-check before it becomes the installed binary: a truncated download or
@@ -365,12 +381,18 @@ ok "configuration valid, and readable by the ${SVC_USER} user"
 # ---------------------------------------------------------------------------
 
 install -d -m 0755 "$DOC_DIR"
-for doc in "${SCRIPT_DIR}/config.toml.example" \
-           "${SCRIPT_DIR}/docs/CONTRIBUTOR_SETUP.md" \
-           "${SCRIPT_DIR}/docs/OPERATIONS.md" \
-           "${SCRIPT_DIR}/docs/SECURITY.md"; do
-	if [ -f "$doc" ]; then
-		install -m 0644 "$doc" "$DOC_DIR/"
+# Reference copies for /usr/share/doc. Present in a checkout or release archive;
+# fetched best-effort from the download host when install.sh is run on its own.
+# None is needed for the service to run, so a missing or un-fetchable file is
+# skipped silently rather than failing the install.
+for doc in config.toml.example CONTRIBUTOR_SETUP.md OPERATIONS.md SECURITY.md; do
+	if [ -f "${SCRIPT_DIR}/${doc}" ]; then
+		install -m 0644 "${SCRIPT_DIR}/${doc}" "$DOC_DIR/"
+	elif [ -f "${SCRIPT_DIR}/docs/${doc}" ]; then
+		install -m 0644 "${SCRIPT_DIR}/docs/${doc}" "$DOC_DIR/"
+	elif [ -n "$DOWNLOAD_BASE" ] && command -v curl >/dev/null 2>&1; then
+		curl -fsSL --proto '=https' --tlsv1.2 \
+			-o "${DOC_DIR}/${doc}" "${DOWNLOAD_BASE%/}/${doc}" 2>/dev/null || true
 	fi
 done
 
@@ -387,7 +409,21 @@ fi
 
 step "Installing the systemd service"
 UNIT_SRC="${SCRIPT_DIR}/systemd/${UNIT_NAME}"
-[ -f "$UNIT_SRC" ] || die "${UNIT_SRC} is missing from this checkout"
+if [ ! -f "$UNIT_SRC" ]; then
+	# install.sh was run on its own — the curl'd one-line install — with no
+	# repository beside it. Fetch the unit from the same host as the binary. It
+	# rides the same verified-HTTPS connection this script arrived on; the binary
+	# was additionally checked against SHA256SUMS above.
+	[ -n "$DOWNLOAD_BASE" ] || die "no systemd unit beside this script and ADSBNG_DOWNLOAD_BASE is empty.
+Run install.sh from a full checkout or release archive, or leave ADSBNG_DOWNLOAD_BASE at its default."
+	command -v curl >/dev/null 2>&1 || die "curl is required to download the systemd unit"
+	[ -n "$CLEANUP_DIR" ] || CLEANUP_DIR="$(mktemp -d)"
+	UNIT_SRC="${CLEANUP_DIR}/${UNIT_NAME}"
+	unit_url="${DOWNLOAD_BASE%/}/${UNIT_NAME}"
+	info "    downloading ${unit_url}"
+	curl -fsSL --proto '=https' --tlsv1.2 -o "$UNIT_SRC" "$unit_url" \
+		|| die "download failed: ${unit_url}"
+fi
 install -o root -g root -m 0644 "$UNIT_SRC" "$UNIT_DEST"
 systemctl daemon-reload
 ok "installed ${UNIT_DEST}"

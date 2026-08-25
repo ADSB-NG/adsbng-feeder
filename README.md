@@ -149,8 +149,11 @@ sudo systemctl restart adsbng-feeder
 ```bash
 adsbng-feeder --version
 adsbng-feeder --check-config [--config PATH]
+adsbng-feeder --verify [--config PATH]         # confirm the token with the gateway
 sudo systemctl {status,restart,stop,start} adsbng-feeder
 sudo journalctl -u adsbng-feeder -f
+sudo ./install.sh --stop                       # stop the service (stays installed)
+sudo ./install.sh --uninstall                  # remove the feeder from this machine
 ```
 
 Troubleshooting each failure mode: **[docs/OPERATIONS.md](docs/OPERATIONS.md)**.

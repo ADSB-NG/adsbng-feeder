@@ -10,7 +10,13 @@
 #   2. creates an unprivileged `adsbng` system account for it to run as
 #   3. writes /etc/adsbng-feeder/config.toml (owner-only) with your station
 #      credentials, if it does not already exist
-#   4. installs and starts a systemd service
+#   4. verifies your station token with the ADSBNG gateway, then installs and
+#      starts a systemd service (skip the check with --skip-verify)
+#
+# It can also manage an existing install:
+#
+#   sudo ./install.sh --stop         stop the service (leaves it installed)
+#   sudo ./install.sh --uninstall    remove the feeder from this machine
 #
 # What it deliberately does NOT do:
 #
@@ -52,7 +58,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # install from a mirror you control, or pass --binary PATH to install a locally
 # built binary with no network access at all (see scripts/build.sh). Set it to
 # the empty string to require a local binary and refuse to download.
-DOWNLOAD_BASE="${ADSBNG_DOWNLOAD_BASE:-https://adsbng.app/feeder/v1.0.0}"
+DOWNLOAD_BASE="${ADSBNG_DOWNLOAD_BASE:-https://adsbng.app/feeder/v1.1.0}"
 
 STATION_ID=""
 TOKEN=""
@@ -63,6 +69,11 @@ CA_FILE=""
 BINARY=""
 FORCE_CONFIG=0
 NO_START=0
+SKIP_VERIFY=0
+DO_STOP=0
+DO_UNINSTALL=0
+KEEP_CONFIG=0
+PURGE=0
 
 # ---------------------------------------------------------------------------
 # output helpers
@@ -83,7 +94,10 @@ die()  { printf '%sERROR:%s %s\n' "$C_RED" "$C_OFF" "$*" >&2; exit 1; }
 
 usage() {
 	cat <<'EOF'
-Usage: sudo ./install.sh [options]
+Usage:
+  sudo ./install.sh [options]          install or upgrade the feeder
+  sudo ./install.sh --stop             stop the service (leave it installed)
+  sudo ./install.sh --uninstall        remove the feeder from this machine
 
 Station credentials (prompted for if omitted and no config exists yet):
   --station-id ID        local label for your station, e.g. LAGOS_01
@@ -110,14 +124,259 @@ Installation source:
 Other:
   --force-config         overwrite an existing config.toml
   --no-start             install but do not enable or start the service
+  --skip-verify          do not check the token with the gateway before starting
+                         (the offline shape check still applies)
   -h, --help             show this help
+
+Managing an existing install:
+  --stop                 stop the running service (it stays enabled and installed)
+  --uninstall            stop, disable, and remove the binary, service, docs, and
+                         config from this machine. Does NOT revoke your token —
+                         only ADSBNG can do that.
+  --keep-config          with --uninstall, keep /etc/adsbng-feeder (your token)
+  --purge                with --uninstall, also remove the adsbng system account
 
 Environment:
   ADSBNG_STATION_TOKEN   station token, read if --token/--token-file are absent
   ADSBNG_DOWNLOAD_BASE   base URL to download the binary, systemd unit, and docs
-                         from (default: https://adsbng.app/feeder/v1.0.0). Set it
+                         from (default: https://adsbng.app/feeder/v1.1.0). Set it
                          to the empty string to require a local binary instead.
 EOF
+}
+
+# ---------------------------------------------------------------------------
+# lifecycle and verification helpers
+# ---------------------------------------------------------------------------
+
+# run_as_svc runs a command as the unprivileged service account and returns its
+# exit status unchanged. The mechanism (runuser or su) is chosen once, up front:
+# the older `runuser ... || su ...` idiom cannot tell "runuser is missing" apart
+# from "the command ran and exited nonzero" — and the token check below depends
+# on that real exit code.
+SVC_RUNNER=""
+run_as_svc() {
+	if [ -z "$SVC_RUNNER" ]; then
+		if command -v runuser >/dev/null 2>&1; then
+			SVC_RUNNER="runuser"
+		elif command -v su >/dev/null 2>&1; then
+			SVC_RUNNER="su"
+		else
+			die "neither runuser nor su is available; cannot run as ${SVC_USER}"
+		fi
+	fi
+	if [ "$SVC_RUNNER" = "runuser" ]; then
+		runuser -u "$SVC_USER" -- "$@"
+	else
+		# su -c takes a single shell string; quote each argument so a path with a
+		# space survives. printf %q is a bash builtin (this script runs under bash).
+		local a q cmd=""
+		for a in "$@"; do
+			q="$(printf '%q' "$a")"
+			cmd="${cmd:+$cmd }$q"
+		done
+		su -s /bin/sh -c "$cmd" "$SVC_USER"
+	fi
+}
+
+# validate_token_shape rejects, offline and before anything is written or sent,
+# a string that cannot be a token ADSBNG issued. It catches copy-paste damage —
+# a truncated paste, a stray quote, an old-format string — at prompt time with
+# no network. Necessary but not sufficient: a correctly shaped but non-existent
+# token still passes here and is caught by the gateway check.
+validate_token_shape() {
+	case "$1" in
+		*'"'*|*"'"*|*'#'*|*' '*)
+			die "that token contains a quote, '#', or a space, which is not a shape ADSBNG issues.
+Check for a copy-paste error — a trailing character from your terminal is the usual cause." ;;
+	esac
+	# A station token is "adsbng_" followed by 43 more URL-safe base64 characters.
+	if ! printf '%s' "$1" | grep -Eq '^adsbng_[A-Za-z0-9_-]{43}$'; then
+		die "that does not look like an ADSBNG station token.
+It should start with \`adsbng_\` and then 43 more characters — the whole string
+ADSBNG issued you, pasted with nothing trimmed and no surrounding quotes.
+Check for a copy-paste error and try again."
+	fi
+}
+
+# write_config writes config.toml atomically and privately: created under umask
+# 077 so it is never briefly world-readable, owned by the service user, mode
+# 0600, then renamed into place. Factored out so the verify step can rewrite it
+# after a contributor re-enters a corrected token.
+write_config() {
+	local old_umask tmp_conf
+	old_umask="$(umask)"
+	umask 077
+	tmp_conf="${CONF_FILE}.new.$$"
+	{
+		printf '# /etc/adsbng-feeder/config.toml\n'
+		printf '# Written by install.sh. Contains your station token — keep it at mode 0600.\n'
+		printf '# Full reference: %s/config.toml.example\n\n' "$DOC_DIR"
+		printf 'station_id   = "%s"\n' "$STATION_ID"
+		printf 'token        = "%s"\n' "$TOKEN"
+		printf 'gateway      = "%s"\n' "$GATEWAY"
+		printf 'beast_source = "%s"\n' "$BEAST_SOURCE"
+		if [ -n "$CA_FILE" ]; then
+			printf 'ca_file      = "%s"\n' "$CA_FILE"
+		fi
+	} > "$tmp_conf"
+	umask "$old_umask"
+
+	chown "${SVC_USER}:${SVC_GROUP}" "$tmp_conf"
+	chmod 0600 "$tmp_conf"
+	mv -f "$tmp_conf" "$CONF_FILE"
+	ok "wrote ${CONF_FILE} (mode 0600, owner ${SVC_USER})"
+}
+
+# verify_station asks the gateway whether the configured token belongs to an
+# active station, and refuses to enable a service that could only fail. This is
+# the authoritative check "against existing active contributors": it runs the
+# installed binary's --verify, which authenticates and disconnects without
+# opening the local Beast source or streaming anything.
+#
+# --verify's exit codes are contractual: 0 active, 3 rejected (unknown or
+# revoked), 4 the gateway was unreachable (token unproven, not known-bad). On a
+# fresh interactive install a rejected token is almost always a paste error, so
+# we reprompt (bounded) and rewrite the config in place.
+verify_station() {
+	local attempt=1 max=3 rc out reply
+	while : ; do
+		step "Verifying your token with the ADSBNG gateway"
+		rc=0
+		out="$(run_as_svc "$BIN_DEST" --verify --config "$CONF_FILE" 2>&1)" || rc=$?
+		if [ "$rc" -eq 0 ]; then
+			info "    ${out}"
+			ok "the gateway confirmed this station is active"
+			return 0
+		fi
+
+		if [ "$rc" -eq 3 ]; then
+			warn "the gateway did not accept this token:"
+			info "    ${out}"
+			if [ ! -t 0 ] || [ "$attempt" -ge "$max" ]; then
+				info ""
+				info "The binary and configuration are in place, but the service has NOT"
+				info "been enabled or started, because the token is not an active station."
+				info "Check it against your ADSBNG provisioning message, then re-run either:"
+				info "    sudo ${BIN_DEST} --verify --config ${CONF_FILE}   # re-test the token"
+				info "    sudo ./install.sh --force-config                 # re-enter it"
+				info "If it should be active, contact ADSBNG — it may not be provisioned yet."
+				die "token not verified as an active station; not starting the service."
+			fi
+			info ""
+			info "Re-enter your station token (attempt $((attempt + 1)) of ${max})."
+			TOKEN=""
+			while [ -z "$TOKEN" ]; do
+				read -r -p "Station token : " TOKEN
+			done
+			validate_token_shape "$TOKEN"
+			write_config
+			attempt=$((attempt + 1))
+			continue
+		fi
+
+		# rc 4 or anything else: the gateway could not be reached, so the token
+		# was not proven bad. Usually a network, DNS, TLS, or firewall problem.
+		warn "could not reach the ADSBNG gateway to verify the token:"
+		info "    ${out}"
+		if [ ! -t 0 ]; then
+			die "gateway unreachable and no terminal to confirm on; not starting the service.
+Re-run when connectivity is restored, or pass --skip-verify to install anyway."
+		fi
+		info ""
+		info "The token was not confirmed. You can install anyway and the feeder will"
+		info "keep retrying until the gateway is reachable, or stop here and re-run later."
+		reply=""
+		read -r -p "Install and start anyway without confirming the token? [y/N] : " reply
+		case "$reply" in
+			[yY]|[yY][eE][sS])
+				warn "proceeding without gateway confirmation — the token is NOT verified."
+				return 0 ;;
+			*)
+				die "stopped at your request; the service was not enabled or started.
+Re-run install.sh when the gateway is reachable, or pass --skip-verify." ;;
+		esac
+	done
+}
+
+# do_stop stops the running service but leaves it installed and enabled, so a
+# reboot or `systemctl start` brings it back. For permanent removal use
+# --uninstall.
+do_stop() {
+	command -v systemctl >/dev/null 2>&1 || die "systemctl was not found; nothing to stop."
+	if [ ! -f "$UNIT_DEST" ]; then
+		info "adsbng-feeder does not appear to be installed (${UNIT_DEST} not found)."
+		exit 0
+	fi
+	step "Stopping adsbng-feeder"
+	systemctl stop "$UNIT_NAME" || true
+	if systemctl is-active --quiet "$UNIT_NAME"; then
+		die "the service is still active after stop — check: systemctl status adsbng-feeder"
+	fi
+	ok "adsbng-feeder is stopped (still installed; it will start again on boot)"
+	info ""
+	info "    sudo systemctl start adsbng-feeder     # start it again now"
+	info "    sudo ./install.sh --uninstall          # remove it completely"
+	exit 0
+}
+
+# do_uninstall removes the feeder from this machine: it stops and disables the
+# service, then deletes the binary, unit, docs, and — unless --keep-config — the
+# config directory that holds the token. The unprivileged adsbng account is left
+# in place unless --purge is given.
+#
+# It does not and cannot revoke the token: that lives on ADSBNG's side. Deleting
+# the local config stops THIS machine using it, but only ADSBNG can deactivate
+# the token itself. The reminder is printed at the end.
+do_uninstall() {
+	step "Uninstalling adsbng-feeder"
+
+	if command -v systemctl >/dev/null 2>&1; then
+		systemctl disable --now "$UNIT_NAME" >/dev/null 2>&1 || true
+		if [ -f "$UNIT_DEST" ]; then
+			rm -f "$UNIT_DEST"
+			systemctl daemon-reload || true
+			systemctl reset-failed "$UNIT_NAME" >/dev/null 2>&1 || true
+			ok "removed the systemd service"
+		fi
+	else
+		warn "systemctl was not found; skipping service removal."
+	fi
+
+	if [ -f "$BIN_DEST" ]; then
+		rm -f "$BIN_DEST"
+		ok "removed ${BIN_DEST}"
+	fi
+	if [ -d "$DOC_DIR" ]; then
+		rm -rf "$DOC_DIR"
+		ok "removed ${DOC_DIR}"
+	fi
+
+	if [ "$KEEP_CONFIG" -eq 1 ]; then
+		info "kept ${CONF_DIR} (--keep-config); it still contains your station token."
+	elif [ -d "$CONF_DIR" ]; then
+		rm -rf "$CONF_DIR"
+		ok "removed ${CONF_DIR} (including the stored token)"
+	fi
+
+	if [ "$PURGE" -eq 1 ]; then
+		if id -u "$SVC_USER" >/dev/null 2>&1; then
+			userdel "$SVC_USER" >/dev/null 2>&1 || true
+			if getent group "$SVC_GROUP" >/dev/null 2>&1; then
+				groupdel "$SVC_GROUP" >/dev/null 2>&1 || true
+			fi
+			ok "removed the ${SVC_USER} system account (--purge)"
+		fi
+	else
+		info "left the ${SVC_USER} system account in place (pass --purge to remove it)."
+	fi
+
+	info ""
+	info "${C_BOLD}Uninstalled.${C_OFF}"
+	info ""
+	warn "This did NOT revoke your station token. Uninstalling only removes the"
+	warn "software from this machine; the token can only be deactivated by ADSBNG."
+	warn "If you are decommissioning the station for good, ask ADSBNG to revoke it."
+	exit 0
 }
 
 # ---------------------------------------------------------------------------
@@ -135,12 +394,24 @@ while [ $# -gt 0 ]; do
 		--binary)        BINARY="${2:?--binary needs a value}"; shift 2 ;;
 		--force-config)  FORCE_CONFIG=1; shift ;;
 		--no-start)      NO_START=1; shift ;;
+		--skip-verify)   SKIP_VERIFY=1; shift ;;
+		--stop)          DO_STOP=1; shift ;;
+		--uninstall)     DO_UNINSTALL=1; shift ;;
+		--keep-config)   KEEP_CONFIG=1; shift ;;
+		--purge)         PURGE=1; shift ;;
 		-h|--help)       usage; exit 0 ;;
 		*)               usage >&2; die "unknown option: $1" ;;
 	esac
 done
 
 [ "$(id -u)" -eq 0 ] || die "run this with sudo: sudo ./install.sh"
+
+# Management actions run here: after the root check (they touch systemd and
+# /usr/local/bin, so they need root) but before any architecture detection,
+# download, or config work, because they act on what is already installed.
+# Each of these exits when it is done.
+if [ "$DO_UNINSTALL" -eq 1 ]; then do_uninstall; fi
+if [ "$DO_STOP" -eq 1 ]; then do_stop; fi
 
 case "$(uname -s)" in
 	Linux) ;;
@@ -327,37 +598,12 @@ Pass --station-id, --token-file and --gateway (see --help)."
 		info ""
 	fi
 
-	# A token containing a quote or a '#' would silently corrupt the file, and
-	# the resulting failure ("unauthorized") gives no clue why.
-	case "$TOKEN" in
-		*'"'*|*"'"*|*'#'*|*' '*)
-			die "that token contains a quote, '#', or a space, which is not a shape ADSBNG issues.
-Check for a copy-paste error — a trailing character from your terminal is the usual cause." ;;
-	esac
+	# Reject a token that cannot be one ADSBNG issued (Layer 1, offline) before
+	# it is written anywhere. A well-formed but non-existent token still passes
+	# this; the gateway check below is what confirms it is an active station.
+	validate_token_shape "$TOKEN"
 
-	# umask before creation: the file must never exist, even briefly, in a
-	# world-readable state.
-	old_umask="$(umask)"
-	umask 077
-	tmp_conf="${CONF_FILE}.new.$$"
-	{
-		printf '# /etc/adsbng-feeder/config.toml\n'
-		printf '# Written by install.sh. Contains your station token — keep it at mode 0600.\n'
-		printf '# Full reference: %s/config.toml.example\n\n' "$DOC_DIR"
-		printf 'station_id   = "%s"\n' "$STATION_ID"
-		printf 'token        = "%s"\n' "$TOKEN"
-		printf 'gateway      = "%s"\n' "$GATEWAY"
-		printf 'beast_source = "%s"\n' "$BEAST_SOURCE"
-		if [ -n "$CA_FILE" ]; then
-			printf 'ca_file      = "%s"\n' "$CA_FILE"
-		fi
-	} > "$tmp_conf"
-	umask "$old_umask"
-
-	chown "${SVC_USER}:${SVC_GROUP}" "$tmp_conf"
-	chmod 0600 "$tmp_conf"
-	mv -f "$tmp_conf" "$CONF_FILE"
-	ok "wrote ${CONF_FILE} (mode 0600, owner ${SVC_USER})"
+	write_config
 fi
 
 # Enforce ownership and permissions on every run, including upgrades over an
@@ -375,6 +621,25 @@ fi
 # --check-config prints the config with the token masked, never in full.
 info "    ${CHECK_OUT}"
 ok "configuration valid, and readable by the ${SVC_USER} user"
+
+# ---------------------------------------------------------------------------
+# 5b. verify the token with the gateway
+# ---------------------------------------------------------------------------
+#
+# The step above only proved the config parses. This one proves the token
+# actually belongs to an active station, by asking the gateway — the same
+# authenticated TLS handshake the feeder makes when it runs, except it
+# disconnects instead of streaming. A fresh install will not enable or start
+# the service for a token the gateway rejects. --skip-verify overrides this.
+
+if [ "$SKIP_VERIFY" -eq 1 ]; then
+	warn "skipping the gateway token check (--skip-verify)."
+	warn "The token has NOT been confirmed as an active station. If it is wrong the"
+	warn "service will start but the gateway will refuse it; confirm later with:"
+	warn "    sudo ${BIN_DEST} --verify --config ${CONF_FILE}"
+else
+	verify_station
+fi
 
 # ---------------------------------------------------------------------------
 # 6. documentation
@@ -485,6 +750,9 @@ ${C_BOLD}Installed.${C_OFF}
   Restart      : sudo systemctl restart adsbng-feeder
   Config       : ${CONF_FILE}   (mode 0600, owner ${SVC_USER})
   Check config : sudo ${BIN_DEST} --check-config --config ${CONF_FILE}
+  Verify token : sudo ${BIN_DEST} --verify --config ${CONF_FILE}
+  Stop         : sudo systemctl stop adsbng-feeder
+  Uninstall    : sudo ./install.sh --uninstall
 
 Look for a line like:
 

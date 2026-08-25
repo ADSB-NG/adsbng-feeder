@@ -51,6 +51,12 @@ const (
 	flushInterval = 250 * time.Millisecond
 )
 
+// ErrGatewayRejected reports that the gateway completed the handshake but refused
+// the station: the token is unknown or the station is not active. It is distinct
+// from a transport failure (dial/TLS/timeout/EOF), where the token's validity is
+// simply unknown. Callers tell the two apart with errors.Is(err, ErrGatewayRejected).
+var ErrGatewayRejected = errors.New("gateway rejected this station")
+
 // Feeder forwards one local Beast stream to the gateway.
 type Feeder struct {
 	cfg     *Config
@@ -154,6 +160,26 @@ func (f *Feeder) session(ctx context.Context) error {
 	return f.pump(ctx, bconn, gconn, ack)
 }
 
+// Verify performs only the gateway authentication handshake and reports whether
+// the configured token belongs to an active station, then disconnects. Unlike
+// session it does NOT open the local Beast source and streams nothing, so it can
+// run during installation before a receiver is producing any data.
+//
+// On success it returns the gateway-assigned receiver id. On failure the error is
+// either ErrGatewayRejected — a definitive "this is not an active station" — or a
+// transport error, meaning the gateway could not be reached and the token's
+// validity is unknown. Callers distinguish the two with errors.Is.
+func (f *Feeder) Verify(ctx context.Context) (string, error) {
+	conn, ack, err := f.dialGateway(ctx)
+	if err != nil {
+		return "", err
+	}
+	// The successful handshake is all we came for; close immediately, which also
+	// ends the session we just established on the gateway.
+	_ = conn.Close()
+	return ack.ReceiverID, nil
+}
+
 // dialBeast opens the local Beast TCP source.
 func (f *Feeder) dialBeast(ctx context.Context) (net.Conn, error) {
 	d := &net.Dialer{Timeout: dialTimeout}
@@ -209,8 +235,10 @@ func (f *Feeder) dialGateway(ctx context.Context) (net.Conn, *proto.Ack, error) 
 	}
 	if !ack.OK {
 		c.Close()
-		// Deliberately surfaced verbatim; the gateway keeps this coarse.
-		return nil, nil, fmt.Errorf("gateway rejected this station: %s", nz(ack.Error, "unauthorized"))
+		// Deliberately surfaced verbatim; the gateway keeps this coarse. Wrapped
+		// in ErrGatewayRejected so callers can classify it, but the rendered
+		// string is unchanged ("gateway rejected this station: unauthorized").
+		return nil, nil, fmt.Errorf("%w: %s", ErrGatewayRejected, nz(ack.Error, "unauthorized"))
 	}
 
 	// Clear the handshake deadline; the pump manages its own.

@@ -154,15 +154,18 @@ ask what it can do, and the answer should be checkable rather than promised.
   frames, bytes, discarded, uptime. No hostname, no system inventory, no
   telemetry. Read `internal/feeder/feeder.go` — the whole outbound surface is two
   message types.
-- **The installer downloads only the feeder, and only from ADSBNG.** By default
-  `install.sh` fetches the binary — and, when you run it on its own, the systemd
-  unit and reference docs — from ADSBNG's own distribution host over verified
-  HTTPS (TLS 1.2+), then checks the binary against a published `SHA256SUMS` and
-  refuses to install on a mismatch. It contacts nothing else: no analytics, no
-  telemetry, no third party. It installs nothing but the feeder and its unit, and
-  does not touch your readsb configuration. Point `ADSBNG_DOWNLOAD_BASE` at a
-  mirror you control to change where it fetches from, or build/copy the binary
-  yourself and pass `--binary` to install with no network access at all.
+- **The installer contacts only ADSBNG.** By default `install.sh` fetches the
+  binary — and, when you run it on its own, the systemd unit and reference docs —
+  from ADSBNG's own distribution host over verified HTTPS (TLS 1.2+), then checks
+  the binary against a published `SHA256SUMS` and refuses to install on a mismatch.
+  It then makes one short connection to the gateway — the same authenticated TLS
+  check the running feeder makes — to confirm your token belongs to an active
+  station before it starts the service. Both are to ADSBNG over verified TLS; it
+  contacts nothing else: no analytics, no telemetry, no third party. It installs
+  nothing but the feeder and its unit, and does not touch your readsb configuration.
+  Point `ADSBNG_DOWNLOAD_BASE` at a mirror you control to change where it fetches
+  from, pass `--skip-verify` to omit the gateway check, or build/copy the binary
+  yourself and pass `--binary --skip-verify` to install with no network access at all.
 
 Every systemd restriction in the unit file was checked against actual operation
 rather than copied from a hardening checklist, because a restriction that breaks

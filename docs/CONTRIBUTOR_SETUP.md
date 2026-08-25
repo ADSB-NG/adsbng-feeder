@@ -127,22 +127,40 @@ sudo shred -u /root/token.txt
   permissions are what protect it.
 - Installs `/etc/systemd/system/adsbng-feeder.service`, hardened as described in
   [SECURITY.md](SECURITY.md).
-- Validates the config, then enables and starts the service.
+- Validates the config, then **verifies your token with the gateway** — the same
+  authenticated TLS check the running feeder makes — and only enables and starts
+  the service once the gateway confirms the token belongs to an active station. A
+  token the gateway rejects stops the install right there, with the binary and
+  config in place but nothing started, so a mistyped or inactive token fails fast
+  and loudly instead of looking installed while silently refused.
 - Copies this documentation to `/usr/share/doc/adsbng-feeder/`.
 
 ### What the installer does not do
 
 It does not download unrelated software, does not install any ADSBNG application
 code, does not ask for database credentials, and does not touch your readsb
-configuration. Its only network access is to ADSBNG's own distribution host, to
-fetch the feeder binary (verified against a published checksum) and — in the
-one-command install above — the systemd unit. Point `ADSBNG_DOWNLOAD_BASE`
-elsewhere to use a mirror, or install from a local clone or release archive (or
-`--binary`) for no network access at all.
+configuration. All its network access is to ADSBNG, over verified HTTPS/TLS: it
+fetches the feeder binary from the distribution host (checked against a published
+checksum) and — in the one-command install above — the systemd unit; and it makes
+one short connection to the gateway to verify your token before starting the
+service. `ADSBNG_DOWNLOAD_BASE` points the download at a mirror, `--skip-verify`
+omits the gateway check, and a local clone, release archive, or `--binary` with
+`--skip-verify` needs no network at all.
 
 ---
 
 ## Step 3 — confirm you are connected
+
+The installer already confirmed your token with the gateway, so if it finished,
+your credentials are good and this step is just watching data flow. You can repeat
+that token check on its own at any time — it is independent of whether your local
+decoder is up:
+
+```bash
+sudo adsbng-feeder --verify
+```
+
+Then watch the service itself:
 
 ```bash
 sudo systemctl status adsbng-feeder
@@ -201,13 +219,21 @@ megabytes a day. It is not a meaningful load on any normal connection.
 **How do I stop feeding?**
 
 ```bash
-sudo systemctl disable --now adsbng-feeder
+sudo ./install.sh --stop                     # stop now; starts again on next boot
+sudo systemctl disable --now adsbng-feeder   # stop for good, still installed
 ```
 
-To remove it entirely, also delete `/usr/local/bin/adsbng-feeder`,
-`/etc/systemd/system/adsbng-feeder.service`, `/etc/adsbng-feeder/`, and
-`/usr/share/doc/adsbng-feeder/`, then `sudo systemctl daemon-reload`. Tell us as
-well, so we can revoke the token and stop showing your station as expected-online.
+To remove it entirely, run the installer's uninstall — it reverses everything
+Step 2 did:
+
+```bash
+sudo ./install.sh --uninstall   # add --keep-config to keep your token, or --purge to also remove the adsbng user
+```
+
+That deletes the binary, the unit, the docs, and `/etc/adsbng-feeder/` with your
+token in it. It does **not** revoke the token — only ADSBNG can do that — so if
+you are retiring the station for good, tell us as well, and we will revoke it and
+stop showing your station as expected-online.
 
 **I think my token leaked.**  Contact ADSBNG and ask for a rotation. Issuing you
 a new token invalidates the old one immediately; you paste the new one into

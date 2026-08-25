@@ -20,12 +20,36 @@ sudo journalctl -u adsbng-feeder --since '1 hour ago'
 adsbng-feeder --version
 adsbng-feeder --check-config             # validate /etc/adsbng-feeder/config.toml
 adsbng-feeder --check-config --config /path/to/other.toml
+adsbng-feeder --verify                   # ask the gateway to confirm the token
 ```
 
 `--check-config` parses and validates without connecting to anything, and prints
 the resolved configuration with the token masked. It is safe to run at any time,
 and the systemd unit runs it as `ExecStartPre`, so a broken config fails at start
 with a legible message instead of a restart loop.
+
+`--verify` goes one step further: it opens the same authenticated TLS connection
+to the gateway that the running feeder does, confirms the gateway accepts your
+token as an active station, and disconnects without streaming anything. It needs
+no local receiver, so it tells "my token is good" apart from "my decoder is down".
+It exits `0` if the station is active, `3` if the gateway rejects the token
+(unknown or revoked), and `4` if the gateway could not be reached at all. The
+installer runs this before it enables the service, so a fresh install never starts
+against a token the gateway would refuse.
+
+### Stopping and removing
+
+```bash
+sudo ./install.sh --stop        # stop the service (stays installed; starts on boot)
+sudo ./install.sh --uninstall   # remove the feeder from this machine completely
+```
+
+`--stop` is a friendlier `systemctl stop adsbng-feeder`: it leaves the service
+installed and enabled, so a reboot brings it back. `--uninstall` removes the
+binary, the unit, the documentation, and — unless you pass `--keep-config` —
+`/etc/adsbng-feeder/`, which holds your token; add `--purge` to remove the
+unprivileged `adsbng` account too. Uninstalling does **not** revoke your token —
+see [What is installed where](#what-is-installed-where) below.
 
 ## Changing the configuration
 
@@ -227,6 +251,18 @@ feeder gives up and reports that the source is not Beast.
 No state, cache, or spool directory: the feeder writes nothing to disk, and the
 systemd unit gives it no writable path at all. Restarting it loses nothing but the
 frames in flight.
+
+### Removing it
+
+`sudo ./install.sh --uninstall` reverses the table above: it stops and disables
+the service, then deletes the binary, the unit, `/usr/share/doc/adsbng-feeder/`,
+and `/etc/adsbng-feeder/` with your token inside it. Pass `--keep-config` to leave
+the config in place, or `--purge` to also remove the `adsbng` system account.
+
+**Uninstalling does not revoke your token.** Removing the software stops *this*
+machine from feeding, but the token stays valid on ADSBNG's side until ADSBNG
+deactivates it. If you are retiring a station for good, ask us to revoke it — that
+is the only thing that actually invalidates the credential.
 
 ## Upgrading
 

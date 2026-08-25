@@ -79,17 +79,26 @@ You need three things from ADSBNG first:
 | Station token | a long `adsbng_…` string, shown to you once |
 | Gateway address | `ingest.adsbng.app:443` |
 
-Then, from a release archive or a clone of this repository:
+Then download the installer from ADSBNG and run it:
+
+```bash
+curl -fsSL https://adsbng.app/feeder/install.sh -o install.sh
+sudo bash install.sh
+```
+
+It downloads the right binary for your architecture, verifies it against a
+published `SHA256SUMS`, creates an unprivileged `adsbng` system user, writes
+`/etc/adsbng-feeder/config.toml` with mode `0600`, installs the systemd unit,
+and starts the service — prompting for the three values above if you have not
+already written a config file.
+
+Prefer to build it yourself, or work from a clone or release archive? Run the
+installer from inside the tree and it uses the local binary with no download:
 
 ```bash
 ./scripts/build.sh          # only needed when installing from source
 sudo ./install.sh
 ```
-
-The installer detects your architecture, creates an unprivileged `adsbng` system
-user, writes `/etc/adsbng-feeder/config.toml` with mode `0600`, installs the
-systemd unit, and starts the service. It will prompt for the three values above
-if you have not already written a config file.
 
 Full walkthrough, including how to get readsb to expose Beast on port 30005:
 **[docs/CONTRIBUTOR_SETUP.md](docs/CONTRIBUTOR_SETUP.md)**.
